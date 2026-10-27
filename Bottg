@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 
+from datetime import datetime, timezone, timedelta
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -111,6 +112,8 @@ class AdminStates(StatesGroup):
     adding_number = State()
     broadcasting = State()
 
+class IdeaStates(StatesGroup):
+    waiting_idea = State()
 
 # ============================================================
 # КЛАВИАТУРЫ
@@ -120,9 +123,9 @@ def main_menu_kb():
         [InlineKeyboardButton(text="🛒 Купить физ номер", callback_data="buy")],
         [InlineKeyboardButton(text="💰 Посмотреть цены на физы", callback_data="prices")],
         [InlineKeyboardButton(text="⭐ Посмотреть рейтинг", callback_data="rating")],
+        [InlineKeyboardButton(text="💡 Предложить идеи", callback_data="ideas")],
         [InlineKeyboardButton(text="💬 Связь с модератором", callback_data="moderator")],
     ])
-
 
 def buy_countries_kb():
     buttons = []
@@ -435,6 +438,73 @@ async def cb_instruction(callback: CallbackQuery):
         disable_web_page_preview=True,
     )
     await callback.answer()
+
+@router.callback_query(F.data == "ideas")
+async def cb_ideas(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "Это БЕТА версия бота. Вы можете предложить, что ещё можно добавить в него, "
+        "и если эта идея мне понравится и я добавлю её в бота, то вам дадут "
+        "вознаграждение в виде TON, звёзд, подарков. "
+        "Буду рад обратной связи •-•",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💡 Предложить идею", callback_data="idea_write")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")],
+        ]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "idea_write")
+async def cb_idea_write(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(IdeaStates.waiting_idea)
+    await callback.message.edit_text(
+        "✍️ Напишите вашу идею, и она отправится админу.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Отмена", callback_data="idea_cancel")],
+        ]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "idea_cancel")
+async def cb_idea_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "🏠 Главное меню. Выберите действие:",
+        reply_markup=main_menu_kb(),
+    )
+    await callback.answer()
+
+
+@router.message(IdeaStates.waiting_idea, F.text)
+async def receive_idea(message: Message, state: FSMContext, bot: Bot):
+    await state.clear()
+
+    user = message.from_user
+    username = f"@{user.username}" if user.username else "нет username"
+    tz = timezone(timedelta(hours=5))  # Казахстан (UTC+5), поменяйте при необходимости
+    sent_at = datetime.now(tz).strftime("%d.%m.%Y %H:%M")
+
+    # Без parse_mode, чтобы спецсимволы в тексте идеи не ломали отправку
+    await bot.send_message(
+        ADMIN_ID,
+        f"НОВАЯ ИДЕЯ💡\n\n"
+        f"👤 От: {user.full_name}\n"
+        f"🔗 Username: {username}\n"
+        f"🆔 ID: {user.id}\n"
+        f"🕒 Время: {sent_at}\n\n"
+        f"📝 Текст:\n{message.text}",
+    )
+
+    await message.answer(
+        "✅ Спасибо! Ваша идея отправлена админу.",
+        reply_markup=main_menu_kb(),
+    )
+
+
+@router.message(IdeaStates.waiting_idea)
+async def wrong_idea(message: Message):
+    await message.answer("⚠️ Пожалуйста, отправьте идею текстом.")
 
 
 @router.callback_query(F.data == "admin_panel", F.from_user.id == ADMIN_ID)
