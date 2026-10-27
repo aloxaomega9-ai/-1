@@ -1,0 +1,571 @@
+"""
+Telegram-бот для продажи физических аккаунтов (aiogram 3.x)
+Инструкция по установке — в отдельном сообщении выше.
+"""
+
+import asyncio
+import json
+import os
+
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+
+# ============================================================
+# КОНФИГУРАЦИЯ
+# ============================================================
+BOT_TOKEN = "PASTE_YOUR_TOKEN_HERE"          # <-- ВСТАВЬТЕ СЮДА ТОКЕН ОТ @BotFather
+ADMIN_ID = 1031619961
+PAYMENT_DETAILS = (
+    "Kaspi: (временно не доступен. напишите модеру)\n"
+    "Halyk: 4146213077760441 Ерасыл.Р"
+)
+MODERATOR_USERNAME = "@FaQkj"
+REVIEW_LINK = "@RepFizBota"
+SALES_ENABLED = True
+
+PRICES = {
+    "США": 390,
+    "Мьянма": 450,
+    "Колумбия": 470,
+    "Индия": 490,
+}
+
+COUNTRIES = {
+    "us": "США",
+    "mm": "Мьянма",
+    "co": "Колумбия",
+    "in": "Индия",
+}
+
+DB_FILE = "database.json"
+
+pending_code_requests = []
+
+
+# ============================================================
+# БАЗА ДАННЫХ (JSON)
+# ============================================================
+def init_db():
+    if not os.path.exists(DB_FILE):
+        save_db({
+            "users": [],
+            "numbers": {"США": [], "Мьянма": [], "Колумбия": [], "Индия": []},
+        })
+
+
+def load_db():
+    with open(DB_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_db(data):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def add_user(user_id: int):
+    data = load_db()
+    if user_id not in data["users"]:
+        data["users"].append(user_id)
+        save_db(data)
+
+
+def add_number(country: str, number: str):
+    data = load_db()
+    data["numbers"].setdefault(country, []).append(number)
+    save_db(data)
+
+
+def take_number(country: str):
+    data = load_db()
+    nums = data["numbers"].get(country, [])
+    if not nums:
+        return None
+    num = nums.pop(0)
+    save_db(data)
+    return num
+
+
+def get_count(country: str) -> int:
+    data = load_db()
+    return len(data["numbers"].get(country, []))
+
+
+# ============================================================
+# FSM СОСТОЯНИЯ
+# ============================================================
+class BuyStates(StatesGroup):
+    waiting_receipt = State()
+
+
+class AdminStates(StatesGroup):
+    adding_number = State()
+    broadcasting = State()
+
+
+# ============================================================
+# КЛАВИАТУРЫ
+# ============================================================
+def main_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Купить физ номер", callback_data="buy")],
+        [InlineKeyboardButton(text="💰 Посмотреть цены на физы", callback_data="prices")],
+        [InlineKeyboardButton(text="⭐ Посмотреть рейтинг", callback_data="rating")],
+        [InlineKeyboardButton(text="💬 Связь с модератором", callback_data="moderator")],
+    ])
+
+
+def buy_countries_kb():
+    buttons = []
+    for key, name in COUNTRIES.items():
+        count = get_count(name)
+        buttons.append([InlineKeyboardButton(
+            text=f"{name} — {count} шт. • {PRICES[name]} тг",
+            callback_data=f"buy:{key}",
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_panel_kb():
+    toggle = "⏸ Выключить продажи" if SALES_ENABLED else "▶️ Включить продажи"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить номер", callback_data="admin_add")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text=toggle, callback_data="admin_toggle")],
+    ])
+
+
+def admin_countries_kb():
+    buttons = []
+    for key, name in COUNTRIES.items():
+        buttons.append([InlineKeyboardButton(text=name, callback_data=f"admin_country:{key}")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ============================================================
+# РОУТЕР
+# ============================================================
+router = Router()
+
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    add_user(message.from_user.id)
+    await message.answer(
+        f"👋 Привет, {message.from_user.first_name}!\n\n"
+        f"Добро пожаловать в магазин физических Telegram-аккаунтов.\n"
+        f"Выберите действие ниже 👇",
+        reply_markup=main_menu_kb(),
+    )
+
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ У вас нет доступа к админ-панели.")
+        return
+    await state.clear()
+    await message.answer("⚙️ Админ-панель", reply_markup=admin_panel_kb())
+
+
+@router.callback_query(F.data == "buy")
+async def cb_buy(callback: CallbackQuery):
+    if not SALES_ENABLED:
+        await callback.answer("⏸ Продажи временно приостановлены", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "🌍 Выберите страну для покупки:",
+        reply_markup=buy_countries_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "prices")
+async def cb_prices(callback: CallbackQuery):
+    text = "💰 *Цены на физические номера:*\n\n"
+    for name, price in PRICES.items():
+        text += f"• {name}: *{price} тг*\n"
+    text += "\n📦 Наличие всегда можно проверить в меню «Купить физ номер»."
+    await callback.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")]
+        ]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rating")
+async def cb_rating(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(f"⭐ Наш рейтинг и отзывы: {REVIEW_LINK}")
+
+
+@router.callback_query(F.data == "moderator")
+async def cb_moderator(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        f"Напишите {MODERATOR_USERNAME}, пишите только по существу без воды, "
+        f"поможет вам с покупкой, если вы первый раз тут ^^"
+    )
+
+
+@router.callback_query(F.data == "back_menu")
+async def cb_back_menu(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🏠 Главное меню. Выберите действие:",
+        reply_markup=main_menu_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("buy:"))
+async def cb_buy_country(callback: CallbackQuery):
+    if not SALES_ENABLED:
+        await callback.answer("⏸ Продажи временно приостановлены", show_alert=True)
+        return
+    key = callback.data.split(":")[1]
+    country = COUNTRIES[key]
+    count = get_count(country)
+    if count == 0:
+        await callback.answer("❌ Нет номеров в наличии", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"🌍 Вы выбрали: *{country}*\n"
+        f"💵 Цена: *{PRICES[country]} тг*\n"
+        f"📦 В наличии: *{count} шт.*\n\n"
+        f"Вы точно хотите приобрести этот номер?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm:{key}")],
+            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")],
+        ]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("confirm:"))
+async def cb_confirm_country(callback: CallbackQuery, state: FSMContext):
+    if not SALES_ENABLED:
+        await callback.answer("⏸ Продажи временно приостановлены", show_alert=True)
+        return
+    key = callback.data.split(":")[1]
+    country = COUNTRIES[key]
+
+    await state.set_state(BuyStates.waiting_receipt)
+    await state.update_data(country=country)
+
+    await callback.message.edit_text(
+        f"🌍 Страна: *{country}*\n"
+        f"💵 К оплате: *{PRICES[country]} тг*\n\n"
+        f"💳 *Реквизиты для оплаты:*\n"
+        f"`{PAYMENT_DETAILS}`\n\n"
+        f"📎 После оплаты отправьте *чек (фото или файл)* сюда в чат.\n"
+        f"Администратор проверит его в ближайшее время и выдаст номер.",
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.message(BuyStates.waiting_receipt, F.photo | F.document)
+async def receive_receipt(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    country = data.get("country")
+    await state.clear()
+
+    user = message.from_user
+    username = f"@{user.username}" if user.username else "нет"
+
+    caption = (
+        f"💰 *Новый чек на проверку*\n\n"
+        f"👤 Покупатель: {user.full_name}\n"
+        f"🔗 Username: {username}\n"
+        f"🆔 ID: `{user.id}`\n"
+        f"🌍 Страна: *{country}*\n"
+        f"💵 Сумма: *{PRICES[country]} тг*"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"pay_ok:{user.id}:{country}")],
+        [InlineKeyboardButton(text="❌ Отказать", callback_data=f"pay_no:{user.id}")],
+    ])
+
+    if message.photo:
+        await bot.send_photo(ADMIN_ID, message.photo[-1].file_id, caption=caption,
+                             parse_mode="Markdown", reply_markup=kb)
+    else:
+        await bot.send_document(ADMIN_ID, message.document.file_id, caption=caption,
+                                parse_mode="Markdown", reply_markup=kb)
+
+    await message.answer(
+        "✅ Чек отправлен на проверку. Ожидайте подтверждения от администратора."
+    )
+
+
+@router.message(BuyStates.waiting_receipt)
+async def wrong_receipt(message: Message):
+    await message.answer("⚠️ Пожалуйста, отправьте чек именно как *фото* или *файл*.",
+                         parse_mode="Markdown")
+
+
+@router.callback_query(F.data.startswith("pay_ok:"), F.from_user.id == ADMIN_ID)
+async def cb_pay_ok(callback: CallbackQuery, bot: Bot):
+    parts = callback.data.split(":")
+    user_id = int(parts[1])
+    country = parts[2]
+
+    number = take_number(country)
+    if not number:
+        await callback.answer("❌ Номеров нет в наличии!", show_alert=True)
+        await bot.send_message(
+            user_id,
+            f"❌ К сожалению, номера для страны *{country}* закончились.\n"
+            f"Свяжитесь с модератором {MODERATOR_USERNAME}.",
+            parse_mode="Markdown",
+        )
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📩 Получить код", callback_data=f"get_code:{number}")],
+        [InlineKeyboardButton(text="📖 Инструкция", callback_data="instruction")],
+        [InlineKeyboardButton(text="⭐ Оставить отзыв",
+                              url=f"https://t.me/{REVIEW_LINK.lstrip('@')}")],
+    ])
+
+    await bot.send_message(
+        user_id,
+        f"✅ *Оплата подтверждена!*\n\n"
+        f"🌍 Страна: {country}\n"
+        f"📱 Ваш номер: `{number}`\n\n"
+        f"Сохраните номер и используйте кнопки ниже 👇",
+        parse_mode="Markdown",
+        reply_markup=kb,
+    )
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer("✅ Номер выдан покупателю")
+
+
+@router.callback_query(F.data.startswith("pay_no:"), F.from_user.id == ADMIN_ID)
+async def cb_pay_no(callback: CallbackQuery, bot: Bot):
+    user_id = int(callback.data.split(":")[1])
+    await bot.send_message(
+        user_id,
+        f"❌ Администратор отклонил чек.\n"
+        f"Свяжитесь с модератором {MODERATOR_USERNAME} для выяснения деталей.",
+    )
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer("Отклонено")
+
+
+@router.callback_query(F.data.startswith("get_code:"))
+async def cb_get_code(callback: CallbackQuery, bot: Bot):
+    number = callback.data.split(":", 1)[1]
+    user = callback.from_user
+    username = f"@{user.username}" if user.username else "нет"
+
+    pending_code_requests.append({
+        "user_id": user.id,
+        "number": number,
+        "user_name": user.full_name,
+        "username": username,
+    })
+
+    total_pending = len(pending_code_requests)
+    await bot.send_message(
+        ADMIN_ID,
+        f"🔔 *Запрос кода*\n\n"
+        f"👤 Покупатель: {user.full_name}\n"
+        f"🔗 Username: {username}\n"
+        f"🆔 ID: `{user.id}`\n"
+        f"📱 Номер: `{number}`\n\n"
+        f"➡️ Отправьте *следующим сообщением* код — он автоматически "
+        f"перешлётся покупателю.\n"
+        f"📊 Всего в очереди: {total_pending}",
+        parse_mode="Markdown",
+    )
+
+    await callback.answer("✅ Запрос отправлен модератору", show_alert=True)
+    await callback.message.answer(
+        "📨 Запрос на код отправлен модератору. Ожидайте — код придёт сюда же."
+    )
+
+
+@router.callback_query(F.data == "instruction")
+async def cb_instruction(callback: CallbackQuery):
+    text = (
+        "📖 *Инструкция по подключению номера*\n\n"
+        "1️⃣ Скачайте официальный Telegram "
+        "(App Store / Google Play / с сайта telegram.org).\n"
+        "2️⃣ Откройте приложение и введите полученный номер.\n"
+        "3️⃣ Нажмите «Далее» и дождитесь SMS-кода.\n"
+        "4️⃣ Если SMS не пришёл — нажмите кнопку «📩 Получить код» "
+        "в этом боте, модератор пришлёт код вручную.\n"
+        "5️⃣ Введите код, задайте имя и фото профиля.\n"
+        "6️⃣ Готово! Номер ваш.\n\n"
+        f"❓ Остались вопросы — {MODERATOR_USERNAME}"
+    )
+    await callback.message.answer(text, parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_panel", F.from_user.id == ADMIN_ID)
+async def cb_admin_panel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("⚙️ Админ-панель", reply_markup=admin_panel_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_add", F.from_user.id == ADMIN_ID)
+async def cb_admin_add(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🌍 Выберите страну для добавления номера:",
+        reply_markup=admin_countries_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_country:"), F.from_user.id == ADMIN_ID)
+async def cb_admin_country(callback: CallbackQuery, state: FSMContext):
+    key = callback.data.split(":")[1]
+    country = COUNTRIES[key]
+    await state.set_state(AdminStates.adding_number)
+    await state.update_data(country=country)
+    await callback.message.edit_text(
+        f"✏️ Введите номер для страны *{country}*.\n\n"
+        f"Можно отправить *несколько номеров*, каждый с новой строки.",
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.adding_number, F.text, F.from_user.id == ADMIN_ID)
+async def admin_receive_number(message: Message, state: FSMContext):
+    data = await state.get_data()
+    country = data.get("country")
+    numbers = [n.strip() for n in message.text.strip().split("\n") if n.strip()]
+    for n in numbers:
+        add_number(country, n)
+    await state.clear()
+    await message.answer(
+        f"✅ Добавлено *{len(numbers)}* номер(ов) в *{country}*.\n\n"
+        f"📦 Всего теперь: *{get_count(country)}* шт.",
+        parse_mode="Markdown",
+        reply_markup=admin_panel_kb(),
+    )
+
+
+@router.callback_query(F.data == "admin_broadcast", F.from_user.id == ADMIN_ID)
+async def cb_admin_broadcast(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.broadcasting)
+    await callback.message.edit_text(
+        "📢 Отправьте текст для рассылки всем пользователям бота:"
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.broadcasting, F.text, F.from_user.id == ADMIN_ID)
+async def admin_do_broadcast(message: Message, state: FSMContext, bot: Bot):
+    await state.clear()
+    data = load_db()
+    users = data.get("users", [])
+    await message.answer(f"📢 Начинаю рассылку на {len(users)} пользователей...")
+
+    ok, fail = 0, 0
+    for uid in users:
+        try:
+            await bot.send_message(uid, message.text)
+            ok += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.05)
+
+    await message.answer(
+        f"✅ *Рассылка завершена.*\n\n"
+        f"✔️ Успешно: *{ok}*\n"
+        f"❌ Ошибок: *{fail}*",
+        parse_mode="Markdown",
+        reply_markup=admin_panel_kb(),
+    )
+
+
+@router.callback_query(F.data == "admin_toggle", F.from_user.id == ADMIN_ID)
+async def cb_admin_toggle(callback: CallbackQuery):
+    global SALES_ENABLED
+    SALES_ENABLED = not SALES_ENABLED
+    status = "▶️ ВКЛЮЧЕНЫ" if SALES_ENABLED else "⏸ ВЫКЛЮЧЕНЫ"
+    await callback.message.edit_text(
+        f"⚙️ Админ-панель\n\n💰 Продажи сейчас: *{status}*",
+        parse_mode="Markdown",
+        reply_markup=admin_panel_kb(),
+    )
+    await callback.answer(f"Продажи {status}")
+
+
+@router.message(F.from_user.id == ADMIN_ID, F.text)
+async def admin_catch_all(message: Message, bot: Bot, state: FSMContext):
+    current = await state.get_state()
+    if current is not None:
+        return
+    if message.text.startswith("/"):
+        return
+    if not pending_code_requests:
+        return
+
+    req = pending_code_requests.pop(0)
+    try:
+        await bot.send_message(
+            req["user_id"],
+            f"📩 Код для номера {req['number']}:\n\n"
+            f"🔑 {message.text}\n\n"
+            f"Если код не подошёл — нажмите «📩 Получить код» ещё раз.",
+        )
+        remaining = len(pending_code_requests)
+        await message.answer(
+            f"✅ Код переслан покупателю *{req['user_name']}* "
+            f"(ID: `{req['user_id']}`).\n"
+            f"📊 Осталось запросов в очереди: {remaining}",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка отправки покупателю: {e}")
+
+
+async def main():
+    init_db()
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+    print("🤖 Бот запущен. Нажмите Ctrl+C для остановки.")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n⛔ Бот остановлен пользователем.")
