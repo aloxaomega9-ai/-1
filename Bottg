@@ -440,7 +440,7 @@ async def wrong_receipt(message: Message):
                          parse_mode="Markdown")
 
 
-@@router.callback_query(F.data.startswith("pay_ok:"), F.from_user.id == ADMIN_ID)
+@router.callback_query(F.data.startswith("pay_ok:"), F.from_user.id == ADMIN_ID)
 async def cb_pay_ok(callback: CallbackQuery, bot: Bot):
     parts = callback.data.split(":")
     user_id = int(parts[1])
