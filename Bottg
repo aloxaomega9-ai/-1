@@ -7,7 +7,7 @@ import asyncio
 import json
 import os
 
-from aiohttp import webц
+from aiohttp import web
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from datetime import datetime, timezone, timedelta
 from aiogram.filters import Command, CommandStart
