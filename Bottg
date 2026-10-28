@@ -23,7 +23,7 @@ from aiogram.types import (
 # ============================================================
 # КОНФИГУРАЦИЯ
 # ============================================================
-BOT_TOKEN = "PASTE_YOUR_TOKEN_HERE"          # <-- ВСТАВЬТЕ СЮДА ТОКЕН ОТ @BotFather
+BOT_TOKEN = "9173707029:AAEOXtJUsRgYp6VJ78XJjucRqW4XXKJTJRU"          # <-- ВСТАВЬТЕ СЮДА ТОКЕН ОТ @BotFather
 ADMIN_ID = 1031619961
 PAYMENT_DETAILS = (
     "Kaspi: (временно не доступен. напишите модеру)\n"
