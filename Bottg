@@ -16,8 +16,9 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
 )
-
 # ============================================================
 # КОНФИГУРАЦИЯ
 # ============================================================
@@ -215,6 +216,16 @@ def main_menu_kb():
         [InlineKeyboardButton(text="💬 Связь с модератором", callback_data="moderator")],
     ])
 
+def reply_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[[
+            KeyboardButton(text="🏠 Главное меню"),
+            KeyboardButton(text="🛠 Техподдержка"),
+        ]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
 def buy_countries_kb():
     buttons = []
     for key, name in COUNTRIES.items():
@@ -293,11 +304,13 @@ async def cmd_start(message: Message, state: FSMContext):
     add_user(message.from_user.id)
     await message.answer(
         f"👋 Привет, {message.from_user.first_name}!\n\n"
-        f"Добро пожаловать в магазин физических Telegram-аккаунтов.\n"
-        f"Выберите действие ниже 👇",
+        f"Добро пожаловать в магазин физических Telegram-аккаунтов.",
+        reply_markup=reply_kb(),
+    )
+    await message.answer(
+        "Выберите действие ниже 👇",
         reply_markup=main_menu_kb(),
     )
-
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
@@ -307,6 +320,21 @@ async def cmd_admin(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("⚙️ Админ-панель", reply_markup=admin_panel_kb())
 
+@router.message(F.text == "🏠 Главное меню")
+async def kb_main_menu(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "🏠 Главное меню. Выберите действие:",
+        reply_markup=main_menu_kb(),
+    )
+
+
+@router.message(F.text == "🛠 Техподдержка")
+async def kb_support(message: Message):
+    await message.answer(
+        f"Напишите {MODERATOR_USERNAME}, пишите только по существу без воды, "
+        f"поможет вам с покупкой, если вы первый раз тут ^^"
+    )
 
 @router.callback_query(F.data == "buy")
 async def cb_buy(callback: CallbackQuery):
