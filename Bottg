@@ -572,7 +572,7 @@ async def cb_get_code(callback: CallbackQuery, bot: Bot):
         parse_mode="Markdown",
     )
 
-        await callback.answer("✅ Запрос отправлен модератору", show_alert=True)
+    await callback.answer("✅ Запрос отправлен модератору", show_alert=True)
     await callback.message.answer(
         "📨 Запрос на код отправлен модератору. Ожидайте — код придёт сюда же."
     )
