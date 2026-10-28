@@ -416,7 +416,7 @@ async def receive_receipt(message: Message, state: FSMContext, bot: Bot):
         f"💵 Сумма: *{PRICES[country]} тг*"
     )
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[
+kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"pay_ok:{user.id}:{country}")],
         [InlineKeyboardButton(text="❌ Отказать", callback_data=f"pay_no:{user.id}:{country}")],
         [InlineKeyboardButton(text="🚫 В чёрный список", callback_data=f"ban:{user.id}")],
