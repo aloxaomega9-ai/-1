@@ -9,7 +9,6 @@ import os
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from datetime import datetime, timezone, timedelta
-from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -24,7 +23,7 @@ from aiogram.types import (
 # ============================================================
 # КОНФИГУРАЦИЯ
 # ============================================================
-BOT_TOKEN = "9173707029:AAEOXtJUsRgYp6VJ78XJjucRqW4XXKJTJRU"          # <-- ВСТАВЬТЕ СЮДА ТОКЕН ОТ @BotFather
+BOT_TOKEN = "PASTE_YOUR_TOKEN_HERE"          # <-- ВСТАВЬТЕ СЮДА ТОКЕН ОТ @BotFather
 ADMIN_ID = 1031619961
 PAYMENT_DETAILS = (
     "Kaspi: (временно не доступен. напишите модеру)\n"
@@ -60,11 +59,20 @@ pending_code_requests = []
 # БАЗА ДАННЫХ (JSON)
 # ============================================================
 def init_db():
+    empty = {
+        "users": [],
+        "numbers": {"США": [], "Мьянма": [], "Колумбия": [], "Индия": []},
+    }
     if not os.path.exists(DB_FILE):
-        save_db({
-            "users": [],
-            "numbers": {"США": [], "Мьянма": [], "Колумбия": [], "Индия": []},
-        })
+        save_db(empty)
+        return
+    try:
+        load_db()
+    except Exception:
+        # Файл битый или пустой: сохраняем копию и создаём новый
+        os.replace(DB_FILE, DB_FILE + ".bak")
+        save_db(empty)
+        print("⚠️ database.json был повреждён, копия сохранена в database.json.bak")
 
 
 def load_db():
@@ -279,8 +287,6 @@ class BlacklistMiddleware(BaseMiddleware):
 router = Router()
 router.message.outer_middleware(BlacklistMiddleware())
 router.callback_query.outer_middleware(BlacklistMiddleware())
-
-router = Router()
 
 
 @router.message(CommandStart())
@@ -511,44 +517,6 @@ async def cb_pay_no(callback: CallbackQuery, bot: Bot):
         f"❌ Администратор отклонил чек.\n"
         f"Свяжитесь с модератором {MODERATOR_USERNAME} для выяснения деталей.",
     )
-    await callback.answer("Отклонено")
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📩 Получить код", callback_data=f"get_code:{number}")],
-        [InlineKeyboardButton(text="📖 Инструкция", callback_data="instruction")],
-        [InlineKeyboardButton(text="⭐ Оставить отзыв",
-                              url=f"https://t.me/{REVIEW_LINK.lstrip('@')}")],
-    ])
-
-    await bot.send_message(
-        user_id,
-        f"✅ *Оплата подтверждена!*\n\n"
-        f"🌍 Страна: {country}\n"
-        f"📱 Ваш номер: `{number}`\n\n"
-        f"Сохраните номер и используйте кнопки ниже 👇",
-        parse_mode="Markdown",
-        reply_markup=kb,
-    )
-
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    await callback.answer("✅ Номер выдан покупателю")
-
-
-@router.callback_query(F.data.startswith("pay_no:"), F.from_user.id == ADMIN_ID)
-async def cb_pay_no(callback: CallbackQuery, bot: Bot):
-    user_id = int(callback.data.split(":")[1])
-    await bot.send_message(
-        user_id,
-        f"❌ Администратор отклонил чек.\n"
-        f"Свяжитесь с модератором {MODERATOR_USERNAME} для выяснения деталей.",
-    )
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
     await callback.answer("Отклонено")
 
 
