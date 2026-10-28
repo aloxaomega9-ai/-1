@@ -25,7 +25,7 @@ from aiogram.types import (
 BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_TOKEN_HERE")  # <-- токен от @BotFather
 ADMIN_ID = 1031619961
 PAYMENT_DETAILS = (
-    "Kaspi: (временно не доступен. напишите модеру)\n"
+    "Kaspi: 4400 4303 1217 4029 Равиль Ж \n"
     "Halyk: 4146213077760441 Ерасыл.Р"
 )
 MODERATOR_USERNAME = "@FaQkj"
