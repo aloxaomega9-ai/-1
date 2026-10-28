@@ -220,7 +220,6 @@ def buy_countries_kb():
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
 def admin_panel_kb():
     toggle = "⏸ Выключить продажи" if SALES_ENABLED else "▶️ Включить продажи"
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -233,6 +232,14 @@ def admin_panel_kb():
         [InlineKeyboardButton(text=toggle, callback_data="admin_toggle")],
     ])
 
+def admin_countries_kb():
+    buttons = [
+        [InlineKeyboardButton(text=f"{name} — {get_count(name)} шт.",
+                              callback_data=f"admin_country:{key}")]
+        for key, name in COUNTRIES.items()
+    ]
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def admin_numbers_countries_kb():
     buttons = [
