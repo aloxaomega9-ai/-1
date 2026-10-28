@@ -1,13 +1,10 @@
-"""
-Telegram-бот для продажи физических аккаунтов (aiogram 3.x)
-Инструкция по установке — в отдельном сообщении выше.
-"""
-
 import asyncio
 import json
 import os
 
+import aiohttp
 from aiohttp import web
+
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from datetime import datetime, timezone, timedelta
 from aiogram.filters import Command, CommandStart
@@ -24,7 +21,7 @@ from aiogram.types import (
 # ============================================================
 # КОНФИГУРАЦИЯ
 # ============================================================
-BOT_TOKEN = "9173707029:AAEOXtJUsRgYp6VJ78XJjucRqW4XXKJTJRU"          # <-- ВСТАВЬТЕ СЮДА ТОКЕН ОТ @BotFather
+BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_TOKEN_HERE")  # <-- токен от @BotFather
 ADMIN_ID = 1031619961
 PAYMENT_DETAILS = (
     "Kaspi: (временно не доступен. напишите модеру)\n"
@@ -978,14 +975,36 @@ async def start_web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    print(f"🌐 Веб-сервер запущен на порту {port}")
+
+
+async def keep_alive():
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        return
+    async with aiohttp.ClientSession() as session:
+        while True:
+            await asyncio.sleep(600)
+            try:
+                await session.get(url)
+            except Exception:
+                pass
 
 
 async def main():
     init_db()
     load_prices()
     await start_web_server()
+    asyncio.create_task(keep_alive())
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     print("🤖 Бот запущен. Нажмите Ctrl+C для остановки.")
     await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n⛔ Бот остановлен пользователем.")
