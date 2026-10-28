@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from datetime import datetime, timezone, timedelta
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
@@ -49,6 +50,9 @@ COUNTRIES = {
 
 DB_FILE = "database.json"
 
+TZ = timezone(timedelta(hours=5))   # UTC+5
+review_asked = set()                # кому уже напомнили про отзыв
+
 pending_code_requests = []
 
 
@@ -65,7 +69,82 @@ def init_db():
 
 def load_db():
     with open(DB_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    data.setdefault("users", [])
+    data.setdefault("numbers", {})
+    data.setdefault("orders", [])
+    data.setdefault("blacklist", [])
+    data.setdefault("prices", {})
+    return data
+
+
+# ---- Цены ----
+def load_prices():
+    PRICES.update(load_db().get("prices", {}))
+
+
+def set_price(country: str, price: int):
+    PRICES[country] = price
+    data = load_db()
+    data["prices"] = dict(PRICES)
+    save_db(data)
+
+
+# ---- Заказы ----
+def add_order(user_id, user_name, username, country, price, number, status):
+    data = load_db()
+    order = {
+        "id": len(data["orders"]) + 1,
+        "user_id": user_id,
+        "user_name": user_name,
+        "username": username,
+        "country": country,
+        "price": price,
+        "number": number,
+        "status": status,  # "выдан" или "отклонён"
+        "created_at": datetime.now(TZ).strftime("%d.%m.%Y %H:%M"),
+    }
+    data["orders"].append(order)
+    save_db(data)
+    return order
+
+
+# ---- Номера ----
+def delete_number(country: str, number: str) -> bool:
+    data = load_db()
+    nums = data["numbers"].get(country, [])
+    if number in nums:
+        nums.remove(number)
+        save_db(data)
+        return True
+    return False
+
+
+# ---- Чёрный список ----
+def is_blacklisted(user_id: int) -> bool:
+    return user_id in load_db()["blacklist"]
+
+
+def add_blacklist(user_id: int):
+    data = load_db()
+    if user_id not in data["blacklist"]:
+        data["blacklist"].append(user_id)
+        save_db(data)
+
+
+def remove_blacklist(user_id: int):
+    data = load_db()
+    if user_id in data["blacklist"]:
+        data["blacklist"].remove(user_id)
+        save_db(data)
+
+
+async def get_user_info(bot: Bot, user_id: int):
+    try:
+        chat = await bot.get_chat(user_id)
+        return chat.full_name, (f"@{chat.username}" if chat.username else "нет")
+    except Exception:
+        return "Неизвестно", "нет"
 
 
 def save_db(data):
@@ -111,6 +190,8 @@ class BuyStates(StatesGroup):
 class AdminStates(StatesGroup):
     adding_number = State()
     broadcasting = State()
+    changing_price = State()
+    blacklist_add = State()
 
 class IdeaStates(StatesGroup):
     waiting_idea = State()
@@ -121,6 +202,7 @@ class IdeaStates(StatesGroup):
 def main_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛒 Купить физ номер", callback_data="buy")],
+        [InlineKeyboardButton(text="📦 Мои покупки", callback_data="my_orders")],
         [InlineKeyboardButton(text="💰 Посмотреть цены на физы", callback_data="prices")],
         [InlineKeyboardButton(text="⭐ Посмотреть рейтинг", callback_data="rating")],
         [InlineKeyboardButton(text="💡 Предложить идеи", callback_data="ideas")],
@@ -142,16 +224,32 @@ def buy_countries_kb():
 def admin_panel_kb():
     toggle = "⏸ Выключить продажи" if SALES_ENABLED else "▶️ Включить продажи"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить номер", callback_data="admin_add")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="➕ Добавить номер", callback_data="admin_add"),
+         InlineKeyboardButton(text="📦 Номера", callback_data="admin_numbers")],
+        [InlineKeyboardButton(text="💵 Цены", callback_data="admin_prices"),
+         InlineKeyboardButton(text="📋 Заказы", callback_data="admin_orders")],
+        [InlineKeyboardButton(text="🚫 Чёрный список", callback_data="admin_blacklist"),
+         InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text=toggle, callback_data="admin_toggle")],
     ])
 
 
-def admin_countries_kb():
-    buttons = []
-    for key, name in COUNTRIES.items():
-        buttons.append([InlineKeyboardButton(text=name, callback_data=f"admin_country:{key}")])
+def admin_numbers_countries_kb():
+    buttons = [
+        [InlineKeyboardButton(text=f"{name} — {get_count(name)} шт.",
+                              callback_data=f"adm_nums:{key}")]
+        for key, name in COUNTRIES.items()
+    ]
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_prices_kb():
+    buttons = [
+        [InlineKeyboardButton(text=f"{name} — {PRICES[name]} тг",
+                              callback_data=f"adm_price:{key}")]
+        for key, name in COUNTRIES.items()
+    ]
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -159,6 +257,22 @@ def admin_countries_kb():
 # ============================================================
 # РОУТЕР
 # ============================================================
+class BlacklistMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = event.from_user
+        if user and user.id != ADMIN_ID and is_blacklisted(user.id):
+            if isinstance(event, CallbackQuery):
+                await event.answer("⛔ Вы заблокированы.", show_alert=True)
+            else:
+                await event.answer("⛔ Вы заблокированы в этом боте.")
+            return
+        return await handler(event, data)
+
+
+router = Router()
+router.message.outer_middleware(BlacklistMiddleware())
+router.callback_query.outer_middleware(BlacklistMiddleware())
+
 router = Router()
 
 
@@ -302,9 +416,10 @@ async def receive_receipt(message: Message, state: FSMContext, bot: Bot):
         f"💵 Сумма: *{PRICES[country]} тг*"
     )
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+        kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"pay_ok:{user.id}:{country}")],
-        [InlineKeyboardButton(text="❌ Отказать", callback_data=f"pay_no:{user.id}")],
+        [InlineKeyboardButton(text="❌ Отказать", callback_data=f"pay_no:{user.id}:{country}")],
+        [InlineKeyboardButton(text="🚫 В чёрный список", callback_data=f"ban:{user.id}")],
     ])
 
     if message.photo:
@@ -325,11 +440,17 @@ async def wrong_receipt(message: Message):
                          parse_mode="Markdown")
 
 
-@router.callback_query(F.data.startswith("pay_ok:"), F.from_user.id == ADMIN_ID)
+@@router.callback_query(F.data.startswith("pay_ok:"), F.from_user.id == ADMIN_ID)
 async def cb_pay_ok(callback: CallbackQuery, bot: Bot):
     parts = callback.data.split(":")
     user_id = int(parts[1])
     country = parts[2]
+
+    # Сразу убираем кнопки, защита от двойного нажатия
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
     number = take_number(country)
     if not number:
@@ -340,11 +461,50 @@ async def cb_pay_ok(callback: CallbackQuery, bot: Bot):
             f"Свяжитесь с модератором {MODERATOR_USERNAME}.",
             parse_mode="Markdown",
         )
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
         return
+
+    name, username = await get_user_info(bot, user_id)
+    add_order(user_id, name, username, country, PRICES.get(country, 0), number, "выдан")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📩 Получить код", callback_data=f"get_code:{number}")],
+        [InlineKeyboardButton(text="📖 Инструкция", callback_data="instruction")],
+        [InlineKeyboardButton(text="⭐ Оставить отзыв",
+                              url=f"https://t.me/{REVIEW_LINK.lstrip('@')}")],
+    ])
+
+    await bot.send_message(
+        user_id,
+        f"✅ *Оплата подтверждена!*\n\n"
+        f"🌍 Страна: {country}\n"
+        f"📱 Ваш номер: `{number}`\n\n"
+        f"Сохраните номер и используйте кнопки ниже 👇",
+        parse_mode="Markdown",
+        reply_markup=kb,
+    )
+    await callback.answer("✅ Номер выдан покупателю")
+
+
+@router.callback_query(F.data.startswith("pay_no:"), F.from_user.id == ADMIN_ID)
+async def cb_pay_no(callback: CallbackQuery, bot: Bot):
+    parts = callback.data.split(":")
+    user_id = int(parts[1])
+    country = parts[2]
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    name, username = await get_user_info(bot, user_id)
+    add_order(user_id, name, username, country, PRICES.get(country, 0), "—", "отклонён")
+
+    await bot.send_message(
+        user_id,
+        f"❌ Администратор отклонил чек.\n"
+        f"Свяжитесь с модератором {MODERATOR_USERNAME} для выяснения деталей.",
+    )
+    await callback.answer("Отклонено")
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📩 Получить код", callback_data=f"get_code:{number}")],
@@ -412,10 +572,20 @@ async def cb_get_code(callback: CallbackQuery, bot: Bot):
         parse_mode="Markdown",
     )
 
-    await callback.answer("✅ Запрос отправлен модератору", show_alert=True)
+        await callback.answer("✅ Запрос отправлен модератору", show_alert=True)
     await callback.message.answer(
         "📨 Запрос на код отправлен модератору. Ожидайте — код придёт сюда же."
     )
+
+    if number not in review_asked:
+        review_asked.add(number)
+        await callback.message.answer(
+            "⭐ Пока ждёте код, будем рады вашему отзыву о покупке! 🙏",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⭐ Оставить отзыв",
+                                      url=f"https://t.me/{REVIEW_LINK.lstrip('@')}")]
+            ]),
+        )
 
 
 @router.callback_query(F.data == "instruction")
@@ -599,6 +769,198 @@ async def cb_admin_toggle(callback: CallbackQuery):
     )
     await callback.answer(f"Продажи {status}")
 
+# ---------- Мои покупки (для покупателя) ----------
+@router.callback_query(F.data == "my_orders")
+async def cb_my_orders(callback: CallbackQuery):
+    orders = [
+        o for o in load_db()["orders"]
+        if o["user_id"] == callback.from_user.id and o["status"] == "выдан"
+    ][-10:][::-1]
+
+    if not orders:
+        text = "📦 У вас пока нет покупок."
+    else:
+        text = "📦 Ваши последние покупки:\n\n" + "\n".join(
+            f"#{o['id']} • {o['created_at']}\n{o['country']} • {o['price']} тг\n📱 {o['number']}\n"
+            for o in orders
+        )
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")]
+        ]),
+    )
+    await callback.answer()
+
+
+# ---------- Заказы (админ) ----------
+@router.callback_query(F.data == "admin_orders", F.from_user.id == ADMIN_ID)
+async def cb_admin_orders(callback: CallbackQuery):
+    orders = load_db()["orders"]
+    issued = [o for o in orders if o["status"] == "выдан"]
+    revenue = sum(o["price"] for o in issued)
+
+    if not orders:
+        text = "📋 Заказов пока нет."
+    else:
+        lines = [f"📋 Выдано: {len(issued)} • Выручка: {revenue} тг\n\nПоследние 15 заказов:\n"]
+        for o in orders[-15:][::-1]:
+            icon = "✅" if o["status"] == "выдан" else "❌"
+            lines.append(
+                f"{icon} #{o['id']} • {o['created_at']}\n"
+                f"{o['user_name']} {o['username']} (ID {o['user_id']})\n"
+                f"{o['country']} • {o['price']} тг • {o['number']}\n"
+            )
+        text = "\n".join(lines)
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
+        ]),
+    )
+    await callback.answer()
+
+
+# ---------- Просмотр и удаление номеров ----------
+async def show_numbers(callback: CallbackQuery, key: str):
+    country = COUNTRIES[key]
+    nums = load_db()["numbers"].get(country, [])
+
+    if not nums:
+        text = f"📦 {country}: номеров нет."
+    else:
+        text = f"📦 {country}: {len(nums)} шт.\nНажмите на номер, чтобы удалить."
+        if len(nums) > 20:
+            text += "\nПоказаны первые 20."
+
+    buttons = [
+        [InlineKeyboardButton(text=f"🗑 {n}", callback_data=f"adm_del:{key}:{n}")]
+        for n in nums[:20]
+    ]
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_numbers")])
+    await callback.message.edit_text(
+        text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+
+@router.callback_query(F.data == "admin_numbers", F.from_user.id == ADMIN_ID)
+async def cb_admin_numbers(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "📦 Выберите страну:", reply_markup=admin_numbers_countries_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_nums:"), F.from_user.id == ADMIN_ID)
+async def cb_adm_nums(callback: CallbackQuery):
+    await show_numbers(callback, callback.data.split(":")[1])
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_del:"), F.from_user.id == ADMIN_ID)
+async def cb_adm_del(callback: CallbackQuery):
+    _, key, number = callback.data.split(":", 2)
+    ok = delete_number(COUNTRIES[key], number)
+    await show_numbers(callback, key)
+    await callback.answer("🗑 Удалено" if ok else "Номер уже удалён")
+
+
+# ---------- Изменение цен ----------
+@router.callback_query(F.data == "admin_prices", F.from_user.id == ADMIN_ID)
+async def cb_admin_prices(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "💵 Выберите страну для изменения цены:", reply_markup=admin_prices_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_price:"), F.from_user.id == ADMIN_ID)
+async def cb_adm_price(callback: CallbackQuery, state: FSMContext):
+    country = COUNTRIES[callback.data.split(":")[1]]
+    await state.set_state(AdminStates.changing_price)
+    await state.update_data(country=country)
+    await callback.message.edit_text(
+        f"✏️ {country}: сейчас {PRICES[country]} тг.\nОтправьте новую цену числом."
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.changing_price, F.text, F.from_user.id == ADMIN_ID)
+async def admin_receive_price(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit() or int(text) <= 0:
+        await message.answer("⚠️ Введите цену числом, например: 450")
+        return
+    country = (await state.get_data()).get("country")
+    set_price(country, int(text))
+    await state.clear()
+    await message.answer(
+        f"✅ Цена для {country}: {int(text)} тг",
+        reply_markup=admin_panel_kb(),
+    )
+
+
+# ---------- Чёрный список ----------
+async def show_blacklist(callback: CallbackQuery):
+    banned = load_db()["blacklist"]
+    text = f"🚫 Чёрный список: {len(banned)} чел." if banned else "🚫 Чёрный список пуст."
+    buttons = [
+        [InlineKeyboardButton(text=f"✅ Разблокировать {uid}", callback_data=f"adm_unban:{uid}")]
+        for uid in banned[:20]
+    ]
+    buttons.append([InlineKeyboardButton(text="➕ Добавить по ID", callback_data="adm_ban_add")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")])
+    await callback.message.edit_text(
+        text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+
+@router.callback_query(F.data == "admin_blacklist", F.from_user.id == ADMIN_ID)
+async def cb_admin_blacklist(callback: CallbackQuery):
+    await show_blacklist(callback)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_ban_add", F.from_user.id == ADMIN_ID)
+async def cb_ban_add(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.blacklist_add)
+    await callback.message.edit_text("✏️ Отправьте ID пользователя для блокировки (число).")
+    await callback.answer()
+
+
+@router.message(AdminStates.blacklist_add, F.text, F.from_user.id == ADMIN_ID)
+async def admin_receive_ban(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("⚠️ ID должен быть числом.")
+        return
+    if int(text) == ADMIN_ID:
+        await message.answer("⚠️ Себя заблокировать нельзя.")
+        return
+    add_blacklist(int(text))
+    await state.clear()
+    await message.answer(f"🚫 Пользователь {text} добавлен в чёрный список.",
+                         reply_markup=admin_panel_kb())
+
+
+@router.callback_query(F.data.startswith("adm_unban:"), F.from_user.id == ADMIN_ID)
+async def cb_unban(callback: CallbackQuery):
+    remove_blacklist(int(callback.data.split(":")[1]))
+    await show_blacklist(callback)
+    await callback.answer("✅ Разблокирован")
+
+
+@router.callback_query(F.data.startswith("ban:"), F.from_user.id == ADMIN_ID)
+async def cb_ban_from_receipt(callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    add_blacklist(user_id)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer(f"🚫 {user_id} в чёрном списке", show_alert=True)
+
 
 @router.message(F.from_user.id == ADMIN_ID, F.text)
 async def admin_catch_all(message: Message, bot: Bot, state: FSMContext):
@@ -631,6 +993,7 @@ async def admin_catch_all(message: Message, bot: Bot, state: FSMContext):
 
 async def main():
     init_db()
+    load_prices()
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
